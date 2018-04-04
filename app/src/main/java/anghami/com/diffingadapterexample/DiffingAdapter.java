@@ -11,12 +11,39 @@ import android.view.ViewGroup;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * Created on 04/04/2018.
  */
 
 public class DiffingAdapter extends RecyclerView.Adapter<ViewHolder> {
+
+    private static final HandlerThread mBackgroundDiffThread = new HandlerThread("diffing-thread");
+    static {
+        if (!mBackgroundDiffThread.isAlive()) {
+            mBackgroundDiffThread.start();
+        }
+    }
+    private static final Handler mBackgroundHandler = new Handler(mBackgroundDiffThread.getLooper());
+    private static final Handler mMainHandler = new Handler(Looper.getMainLooper());
+
+    private AtomicInteger mDataVersion = new AtomicInteger(0);
+
+    private class DiffRequest {
+        final int dataVersion;
+        List<DataItem> oldItems;
+        List<DataItem> newItems;
+
+        DiffUtil.DiffResult result;
+
+        public DiffRequest(List<DataItem> oldItems, List<DataItem> newItems) {
+            this.dataVersion = mDataVersion.incrementAndGet();
+            this.oldItems = oldItems;
+            this.newItems = newItems;
+        }
+    }
+
     private List<DataItem> mData = new ArrayList<>();
     private RecyclerView mRecyclerView;
 
@@ -52,31 +79,56 @@ public class DiffingAdapter extends RecyclerView.Adapter<ViewHolder> {
             newItems.add(item.copy());
         }
 
-        DiffUtil.DiffResult result = computeDiff(mData, newItems);
-        mData = newItems;
-        result.dispatchUpdatesTo(this);
+        // Make sure the oldItems list doesn't mutate during diff
+        List<DataItem> oldItems = new ArrayList<>(mData);
+
+        DiffRequest request = new DiffRequest(oldItems, newItems);
+        computeDiff(request);
     }
 
-    private DiffUtil.DiffResult computeDiff(final List<DataItem> oldItems, final List<DataItem> newItems) {
-        return DiffUtil.calculateDiff(new DiffUtil.Callback() {
+    private void computeDiff(final DiffRequest request) {
+        mBackgroundHandler.post(new Runnable() {
+            @Override
+            public void run() {
+                _computeDiff(request);
+                mMainHandler.post(new Runnable() {
+                    @Override
+                    public void run() {
+                        applyRequest(request);
+                    }
+                });
+            }
+        });
+    }
+
+    private void applyRequest(DiffRequest request) {
+        if (mDataVersion.intValue() != request.dataVersion) {
+            return;
+        }
+        mData = request.newItems;
+        request.result.dispatchUpdatesTo(this);
+    }
+
+    private void _computeDiff(final DiffRequest request) {
+        request.result = DiffUtil.calculateDiff(new DiffUtil.Callback() {
             @Override
             public int getOldListSize() {
-                return oldItems.size();
+                return request.oldItems.size();
             }
 
             @Override
             public int getNewListSize() {
-                return newItems.size();
+                return request.newItems.size();
             }
 
             @Override
             public boolean areItemsTheSame(int oldItemPosition, int newItemPosition) {
-                return oldItems.get(oldItemPosition).isSameItem(newItems.get(newItemPosition));
+                return request.oldItems.get(oldItemPosition).isSameItem(request.newItems.get(newItemPosition));
             }
 
             @Override
             public boolean areContentsTheSame(int oldItemPosition, int newItemPosition) {
-                return oldItems.get(oldItemPosition).hasSameContent(newItems.get(newItemPosition));
+                return request.oldItems.get(oldItemPosition).hasSameContent(request.newItems.get(newItemPosition));
             }
         });
     }
