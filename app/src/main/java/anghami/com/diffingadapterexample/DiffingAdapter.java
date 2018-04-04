@@ -4,6 +4,7 @@ import android.os.Handler;
 import android.os.HandlerThread;
 import android.os.Looper;
 import android.support.v7.util.DiffUtil;
+import android.support.v7.util.ListUpdateCallback;
 import android.support.v7.widget.RecyclerView;
 import android.view.LayoutInflater;
 import android.view.View;
@@ -114,7 +115,7 @@ public class DiffingAdapter extends RecyclerView.Adapter<ViewHolder> {
         });
     }
 
-    private void applyRequest(DiffRequest request) {
+    private void applyRequest(final DiffRequest request) {
         if (mDataVersion.intValue() != request.dataVersion) {
             return;
         }
@@ -178,6 +179,41 @@ public class DiffingAdapter extends RecyclerView.Adapter<ViewHolder> {
             isDone.set(true);
             isCanceled.set(false);
         }
+        final List<DataItem> targetItems = new ArrayList<>(request.oldItems);
+        request.result.dispatchUpdatesTo(new ListUpdateCallback() {
+            @Override
+            public void onInserted(int position, int count) {
+                for (int i = 0; i < count; i++) {
+                    targetItems.add(position, null);
+                }
+            }
+
+            @Override
+            public void onRemoved(int position, int count) {
+                for (int i = 0; i < count; i++) {
+                    targetItems.remove(position);
+                }
+            }
+
+            @Override
+            public void onMoved(int fromPosition, int toPosition) {
+                DataItem item = targetItems.remove(fromPosition);
+                targetItems.add(toPosition, item);
+            }
+
+            @Override
+            public void onChanged(int position, int count, Object payload) {}
+        });
+        for (int i = 0; i < targetItems.size(); i++) {
+            if (targetItems.get(i) == null) {
+                DataItem newlyInserted = request.newItems.get(i);
+                targetItems.set(i, newlyInserted);
+                // Here we can do something with the newly inserted item
+            }
+        }
+        // Use existing copies of data items instead of newly copied ones where possible
+        // In case we're caching some data in there
+        request.newItems = targetItems;
     }
 
     @Override
