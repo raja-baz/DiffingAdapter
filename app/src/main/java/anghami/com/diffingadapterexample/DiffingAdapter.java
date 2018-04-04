@@ -11,6 +11,7 @@ import android.view.ViewGroup;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /**
@@ -22,12 +23,17 @@ public class DiffingAdapter extends RecyclerView.Adapter<ViewHolder> {
     private static final long MAX_DIFF_TIME_MS = 1_000;
 
     private static final HandlerThread mBackgroundDiffThread = new HandlerThread("diffing-thread");
+    private static final HandlerThread mCancelingThread = new HandlerThread("canceling-thread");
     static {
         if (!mBackgroundDiffThread.isAlive()) {
             mBackgroundDiffThread.start();
         }
+        if (!mCancelingThread.isAlive()) {
+            mCancelingThread.start();
+        }
     }
     private static final Handler mBackgroundHandler = new Handler(mBackgroundDiffThread.getLooper());
+    private static final Handler mCancelingHandler = new Handler(mCancelingThread.getLooper());
     private static final Handler mMainHandler = new Handler(Looper.getMainLooper());
 
     private AtomicInteger mDataVersion = new AtomicInteger(0);
@@ -121,38 +127,57 @@ public class DiffingAdapter extends RecyclerView.Adapter<ViewHolder> {
     }
 
     private void _computeDiff(final DiffRequest request) throws DiffTimeoutException {
-        final long endTimeNs = System.nanoTime() + MAX_DIFF_TIME_MS * 1_000_000; // 1M ns => 1ms
+        final AtomicBoolean isCanceled = new AtomicBoolean(false);
+        final AtomicBoolean isDone = new AtomicBoolean(false);
+        final Object canceledLock = new Object();
+        Runnable cancelRunnable = new Runnable() {
+            @Override
+            public void run() {
+                synchronized (canceledLock) {
+                    if (isDone.get()) {
+                        return;
+                    }
+                    isCanceled.set(true);
+                }
+            }
+        };
+        mCancelingHandler.postDelayed(cancelRunnable, MAX_DIFF_TIME_MS);
 
         request.result = DiffUtil.calculateDiff(new DiffUtil.Callback() {
-            private void checkEndTime() {
-                if (System.nanoTime() > endTimeNs) {
+            private void checkCanceled() {
+                if (isCanceled.get()) {
                     throw new DiffTimeoutException();
                 }
             }
             @Override
             public int getOldListSize() {
-                checkEndTime();
+                checkCanceled();
                 return request.oldItems.size();
             }
 
             @Override
             public int getNewListSize() {
-                checkEndTime();
+                checkCanceled();
                 return request.newItems.size();
             }
 
             @Override
             public boolean areItemsTheSame(int oldItemPosition, int newItemPosition) {
-                checkEndTime();
+                checkCanceled();
                 return request.oldItems.get(oldItemPosition).isSameItem(request.newItems.get(newItemPosition));
             }
 
             @Override
             public boolean areContentsTheSame(int oldItemPosition, int newItemPosition) {
-                checkEndTime();
+                checkCanceled();
                 return request.oldItems.get(oldItemPosition).hasSameContent(request.newItems.get(newItemPosition));
             }
         });
+        mCancelingHandler.removeCallbacks(cancelRunnable);
+        synchronized (canceledLock) {
+            isDone.set(true);
+            isCanceled.set(false);
+        }
     }
 
     @Override
