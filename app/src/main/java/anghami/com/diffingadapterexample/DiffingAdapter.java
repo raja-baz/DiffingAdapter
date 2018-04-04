@@ -19,6 +19,8 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 public class DiffingAdapter extends RecyclerView.Adapter<ViewHolder> {
 
+    private static final long MAX_DIFF_TIME_MS = 1_000;
+
     private static final HandlerThread mBackgroundDiffThread = new HandlerThread("diffing-thread");
     static {
         if (!mBackgroundDiffThread.isAlive()) {
@@ -43,6 +45,8 @@ public class DiffingAdapter extends RecyclerView.Adapter<ViewHolder> {
             this.newItems = newItems;
         }
     }
+
+    private static class DiffTimeoutException extends RuntimeException {}
 
     private List<DataItem> mData = new ArrayList<>();
     private RecyclerView mRecyclerView;
@@ -90,7 +94,10 @@ public class DiffingAdapter extends RecyclerView.Adapter<ViewHolder> {
         mBackgroundHandler.post(new Runnable() {
             @Override
             public void run() {
-                _computeDiff(request);
+                try {
+                    _computeDiff(request);
+                } catch (DiffTimeoutException ignored) {}
+
                 mMainHandler.post(new Runnable() {
                     @Override
                     public void run() {
@@ -106,28 +113,43 @@ public class DiffingAdapter extends RecyclerView.Adapter<ViewHolder> {
             return;
         }
         mData = request.newItems;
-        request.result.dispatchUpdatesTo(this);
+        if (request.result == null) {
+            notifyDataSetChanged();
+        } else {
+            request.result.dispatchUpdatesTo(this);
+        }
     }
 
-    private void _computeDiff(final DiffRequest request) {
+    private void _computeDiff(final DiffRequest request) throws DiffTimeoutException {
+        final long endTimeNs = System.nanoTime() + MAX_DIFF_TIME_MS * 1_000_000; // 1M ns => 1ms
+
         request.result = DiffUtil.calculateDiff(new DiffUtil.Callback() {
+            private void checkEndTime() {
+                if (System.nanoTime() > endTimeNs) {
+                    throw new DiffTimeoutException();
+                }
+            }
             @Override
             public int getOldListSize() {
+                checkEndTime();
                 return request.oldItems.size();
             }
 
             @Override
             public int getNewListSize() {
+                checkEndTime();
                 return request.newItems.size();
             }
 
             @Override
             public boolean areItemsTheSame(int oldItemPosition, int newItemPosition) {
+                checkEndTime();
                 return request.oldItems.get(oldItemPosition).isSameItem(request.newItems.get(newItemPosition));
             }
 
             @Override
             public boolean areContentsTheSame(int oldItemPosition, int newItemPosition) {
+                checkEndTime();
                 return request.oldItems.get(oldItemPosition).hasSameContent(request.newItems.get(newItemPosition));
             }
         });
